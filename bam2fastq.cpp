@@ -257,7 +257,7 @@ struct DeleteObject {
     }
 };
 
-void parse_bamfile(const char *bam_filename, const string &output_template) {
+void parse_bamfile_unmapped(const char *bam_filename, const string &output_template) {
     samfile_t *sam = samopen(bam_filename, "rb", NULL);
     if (sam == NULL) {
         cerr << "Could not open " << bam_filename << endl;
@@ -366,6 +366,366 @@ void parse_bamfile(const char *bam_filename, const string &output_template) {
     }
 }
 
+void parse_bamfile_disc(const char *bam_filename, const string &output_template) {
+    samfile_t *sam = samopen(bam_filename, "rb", NULL);
+    if (sam == NULL) {
+        cerr << "Could not open " << bam_filename << endl;
+        return;
+    }
+    bam1_t *read = bam_init1();
+    size_t exported = 0;
+    size_t all_seen = 0;
+
+    bam_read1(sam->x.bam, read);
+    int lane = get_lane_id(read);
+
+    vector<ostream *> output;
+    if(stdout_pairs) {
+        output = initialize_paired_stdout();
+    } else if(stdout_all) {
+        output = initialize_all_stdout();
+    } else {
+        output = initialize_output(output_template, lane);
+    }
+
+    if (output.empty())
+        return;
+
+    map<string, string> unPaired;
+    map<string, string>::iterator position;
+
+    do {
+        all_seen++;
+        if (!save_aligned && (read->core.flag & BAM_FPROPER_PAIR))
+            continue;
+        if (!save_unaligned && !(read->core.flag & BAM_FPROPER_PAIR))
+            continue;
+        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+            continue;
+
+        exported++;
+        ostringstream ostr;
+        ostr << "@" << get_read_name(read) << endl
+             << get_sequence(read) << endl
+             << "+" << endl
+             << get_qualities(read) << endl;
+
+        //Paired-end is complicated, because both members of the pair
+        //have to be output at the same position of the two files
+
+        // If there is only one output filehandle we don't care about
+        // pairing and can write immediately
+        if(output.size() == 1) {
+            *output[0] << ostr.str();
+        } else if( !(read->core.flag & BAM_FPAIRED) ) {
+            // Is this an unpaired read in a BAM with pairs? write to the _M file
+            *output[2] << ostr.str();
+        } else {
+
+            // Search for the pair in the map
+            string pairName(get_pair_name(read));
+            if (!strict)
+                mangle(pairName);
+            position = unPaired.find(pairName);
+            if (position == unPaired.end()) {
+                //I haven't seen the other member of this pair, so just save it
+                unPaired[pairName] = ostr.str();
+            } else {
+                //Aha!  This will be the second of the two.  Dump them both,
+                //then clean up
+                int r_idx = get_read_idx(read);
+
+                // Since we want to output interleaved pairs in stdout mode
+                // we need to take care to write them in the correct order
+                if(r_idx == 0) {
+                    *output[0] << ostr.str();
+                    *output[1] << position->second;
+                } else {
+                    *output[0] << position->second;
+                    *output[1] << ostr.str();
+                }
+                unPaired.erase(position);
+            }
+        }
+
+    } while (bam_read1(sam->x.bam, read) > 0);
+
+    //The documentation for bam_read1 says that it returns the number of
+    //bytes read - which is true, unless it doesn't read any.  It returns
+    //-1 for normal EOF and -2 for unexpected EOF.  So don't just wait for
+    //it to return 0...
+    bam_destroy1(read);
+    samclose(sam);
+
+    // Write the remaining unpaired file to the single-end file
+    for(map<string, string>::iterator iter = unPaired.begin(); 
+            iter != unPaired.end(); ++iter) {
+        *output[2] << iter->second;
+    }
+
+    // Clean up filehandles
+    for(size_t i = 0; i < output.size(); ++i) {
+        if(output[i] != &std::cout)
+            delete output[i];
+    }
+
+    if (print_msgs) {
+        cerr << all_seen << " sequences in the BAM file" << endl;
+        cerr << exported << " sequences exported" << endl;
+    }
+}
+
+int len_align(const bam1_t *b)  {
+  // pedestrian way, fill in whatever choice you like, currently caculates number of (non-insert, non-delete) 
+  // aligned (match & missmatch) nt's of the query
+  int i;
+  uint32_t *cigar = bam1_cigar(b);
+  uint32_t len  = 0;
+  uint32_t oplen, op;
+
+  for(i=0; i < b->core.n_cigar; i++) {
+    oplen  = bam_cigar_oplen(cigar[i]); // cigar[i] >> BAM_CIGAR_SHIFT;
+    op   = bam_cigar_op(cigar[i]); // cigar[i] & BAM_CIGAR_MASK;
+    if (op == BAM_CMATCH) {
+        len += oplen;
+    }
+  }
+
+  return len;
+}
+
+void parse_bamfile_split(const char *bam_filename, const string &output_template) {
+    samfile_t *sam = samopen(bam_filename, "rb", NULL);
+    if (sam == NULL) {
+        cerr << "Could not open " << bam_filename << endl;
+        return;
+    }
+    bam1_t *read = bam_init1();
+    size_t exported = 0;
+    size_t all_seen = 0;
+
+    bam_read1(sam->x.bam, read);
+    int lane = get_lane_id(read);
+
+    vector<ostream *> output;
+    if(stdout_pairs) {
+        output = initialize_paired_stdout();
+    } else if(stdout_all) {
+        output = initialize_all_stdout();
+    } else {
+        output = initialize_output(output_template, lane);
+    }
+
+    if (output.empty())
+        return;
+
+    map<string, string> unPaired;
+    map<string, string>::iterator position;
+
+    do {
+        all_seen++;
+        // unmapped reads are handles somewhere else
+        if (!save_aligned && (read->core.flag & BAM_FUNMAP))
+            continue;
+        if (!save_unaligned && !(read->core.flag & BAM_FUNMAP))
+            continue;
+        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+            continue;
+
+        // discordant reads are handles somewhere else
+        if (!save_aligned && !(read->core.flag & BAM_FPROPER_PAIR))
+            continue;
+        if (!save_unaligned && (read->core.flag & BAM_FPROPER_PAIR))
+            continue;
+        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+            continue;
+
+        if (len_align(read) > 50) {
+            continue;
+        }
+
+        exported++;
+        ostringstream ostr;
+        ostr << "@" << get_read_name(read) << endl
+             << get_sequence(read) << endl
+             << "+" << endl
+             << get_qualities(read) << endl;
+
+        //Paired-end is complicated, because both members of the pair
+        //have to be output at the same position of the two files
+
+        // If there is only one output filehandle we don't care about
+        // pairing and can write immediately
+        if(output.size() == 1) {
+            *output[0] << ostr.str();
+        } else if( !(read->core.flag & BAM_FPAIRED) ) {
+            // Is this an unpaired read in a BAM with pairs? write to the _M file
+            *output[2] << ostr.str();
+        } else {
+
+            // Search for the pair in the map
+            string pairName(get_pair_name(read));
+            if (!strict)
+                mangle(pairName);
+            position = unPaired.find(pairName);
+            if (position == unPaired.end()) {
+                //I haven't seen the other member of this pair, so just save it
+                unPaired[pairName] = ostr.str();
+            } else {
+                //Aha!  This will be the second of the two.  Dump them both,
+                //then clean up
+                int r_idx = get_read_idx(read);
+
+                // Since we want to output interleaved pairs in stdout mode
+                // we need to take care to write them in the correct order
+                if(r_idx == 0) {
+                    *output[0] << ostr.str();
+                    *output[1] << position->second;
+                } else {
+                    *output[0] << position->second;
+                    *output[1] << ostr.str();
+                }
+                unPaired.erase(position);
+            }
+        }
+
+    } while (bam_read1(sam->x.bam, read) > 0);
+
+    //The documentation for bam_read1 says that it returns the number of
+    //bytes read - which is true, unless it doesn't read any.  It returns
+    //-1 for normal EOF and -2 for unexpected EOF.  So don't just wait for
+    //it to return 0...
+    bam_destroy1(read);
+    samclose(sam);
+
+    // Write the remaining unpaired file to the single-end file
+    for(map<string, string>::iterator iter = unPaired.begin(); 
+            iter != unPaired.end(); ++iter) {
+        *output[2] << iter->second;
+    }
+
+    // Clean up filehandles
+    for(size_t i = 0; i < output.size(); ++i) {
+        if(output[i] != &std::cout)
+            delete output[i];
+    }
+
+    if (print_msgs) {
+        cerr << all_seen << " sequences in the BAM file" << endl;
+        cerr << exported << " sequences exported" << endl;
+    }
+}
+
+void parse_bamfile_orig(const char *bam_filename, const string &output_template) {
+    samfile_t *sam = samopen(bam_filename, "rb", NULL);
+    if (sam == NULL) {
+        cerr << "Could not open " << bam_filename << endl;
+        return;
+    }
+    bam1_t *read = bam_init1();
+    size_t exported = 0;
+    size_t all_seen = 0;
+
+    bam_read1(sam->x.bam, read);
+    int lane = get_lane_id(read);
+
+    vector<ostream *> output;
+    if(stdout_pairs) {
+        output = initialize_paired_stdout();
+    } else if(stdout_all) {
+        output = initialize_all_stdout();
+    } else {
+        output = initialize_output(output_template, lane);
+    }
+
+    if (output.empty())
+        return;
+
+    map<string, string> unPaired;
+    map<string, string>::iterator position;
+
+    do {
+        all_seen++;
+        if (!save_aligned && !(read->core.flag & BAM_FUNMAP))
+            continue;
+        if (!save_unaligned && (read->core.flag & BAM_FUNMAP))
+            continue;
+        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+            continue;
+
+        exported++;
+        ostringstream ostr;
+        ostr << "@" << get_read_name(read) << endl
+             << get_sequence(read) << endl
+             << "+" << endl
+             << get_qualities(read) << endl;
+
+        //Paired-end is complicated, because both members of the pair
+        //have to be output at the same position of the two files
+
+        // If there is only one output filehandle we don't care about
+        // pairing and can write immediately
+        if(output.size() == 1) {
+            *output[0] << ostr.str();
+        } else if( !(read->core.flag & BAM_FPAIRED) ) {
+            // Is this an unpaired read in a BAM with pairs? write to the _M file
+            *output[2] << ostr.str();
+        } else {
+
+            // Search for the pair in the map
+            string pairName(get_pair_name(read));
+            if (!strict)
+                mangle(pairName);
+            position = unPaired.find(pairName);
+            if (position == unPaired.end()) {
+                //I haven't seen the other member of this pair, so just save it
+                unPaired[pairName] = ostr.str();
+            } else {
+                //Aha!  This will be the second of the two.  Dump them both,
+                //then clean up
+                int r_idx = get_read_idx(read);
+
+                // Since we want to output interleaved pairs in stdout mode
+                // we need to take care to write them in the correct order
+                if(r_idx == 0) {
+                    *output[0] << ostr.str();
+                    *output[1] << position->second;
+                } else {
+                    *output[0] << position->second;
+                    *output[1] << ostr.str();
+                }
+                unPaired.erase(position);
+            }
+        }
+
+    } while (bam_read1(sam->x.bam, read) > 0);
+
+    //The documentation for bam_read1 says that it returns the number of
+    //bytes read - which is true, unless it doesn't read any.  It returns
+    //-1 for normal EOF and -2 for unexpected EOF.  So don't just wait for
+    //it to return 0...
+    bam_destroy1(read);
+    samclose(sam);
+
+    // Write the remaining unpaired file to the single-end file
+    for(map<string, string>::iterator iter = unPaired.begin(); 
+            iter != unPaired.end(); ++iter) {
+        *output[2] << iter->second;
+    }
+
+    // Clean up filehandles
+    for(size_t i = 0; i < output.size(); ++i) {
+        if(output[i] != &std::cout)
+            delete output[i];
+    }
+
+    if (print_msgs) {
+        cerr << all_seen << " sequences in the BAM file" << endl;
+        cerr << exported << " sequences exported" << endl;
+    }
+}
+
+
 int main (int argc, char *argv[]) {
     bases[1] = 'A';
     bases[2] = 'C';
@@ -407,6 +767,11 @@ int main (int argc, char *argv[]) {
     argv += optind;
     if (argc == 0)
         usage(1);
-    parse_bamfile(argv[0], output_template);
+    //parse_bamfile(argv[0], output_template);
+
+    parse_bamfile_unmapped(argv[0], "unmapped#.fastq");
+    parse_bamfile_disc(argv[0], "discordant#.fastq");
+    parse_bamfile_split(argv[0], "split#.fastq");
+
     return 0;
 }
