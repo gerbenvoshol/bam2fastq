@@ -295,7 +295,6 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
     map<string, string> unPaired;
     map<string, string>::iterator position;
 
-    size_t filtered = 0;
     do {
         all_seen++;
         // if (!save_aligned && !(read->core.flag & BAM_FUNMAP))
@@ -304,8 +303,6 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
         //     continue;
         if (!save_filtered) {
             if (read->core.flag & BAM_FQCFAIL) {
-                printf("HERE\n");
-                filtered++;
                 continue;
             }
         }
@@ -388,7 +385,6 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
 
     if (print_msgs) {
         cerr << all_seen << " sequences in the BAM file" << endl;
-        cerr << filtered << " sequences" << endl;
         cerr << exported << " sequences exported" << endl;
     }
 }
@@ -581,9 +577,9 @@ void parse_bamfile_split(const char *bam_filename, const string &output_template
             continue;
         }
 
-        if (read->core.flag & 0x1) {
-            continue;
-        }        
+        // if (read->core.flag & 0x1) {
+        //     continue;
+        // }        
 
         if (len_align(read) > 50) {
             continue;
