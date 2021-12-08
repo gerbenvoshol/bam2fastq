@@ -33,7 +33,7 @@ Written by Phillip Dexheimer
 using namespace std;
 
 const char version[] = "1.1.0";
-const char shortopts[] = "o:vhfqsuda";
+const char shortopts[] = "o:vhfqsudan";
 
 int save_aligned = 1;
 int save_unaligned = 1;
@@ -48,6 +48,7 @@ int align = 0; // save mapped reads
 int unmap = 0; // save unmapped reads
 int disco = 0; // save discordant reads
 int split = 0; // save split reads
+int no_unmapped = 0; // Do not output unmapped (one or both) discordant reads
 
 static struct option longopts[] = {
     { "help",            no_argument,       NULL,           'h' },
@@ -58,6 +59,7 @@ static struct option longopts[] = {
 //    { "mapped",              no_argument,       NULL,           'a' }, // save aligned
     { "unmapped",        no_argument,       NULL,           'u' }, // save unmapped
     { "discordant",      no_argument,       NULL,           'd' }, // save discordant
+    { "no_unmapped",     no_argument,       NULL,           'n' }, // Do not output unmapped (one or both) discordant reads
     { "split",           no_argument,       NULL,           's' }, // save split
     { "strict",          no_argument,       NULL,            0  },
     { "overwrite",       no_argument,       &overwrite_files,0  },
@@ -96,6 +98,8 @@ void usage(int error=1) {
          << "       Reads in the BAM that are not aligned will be extracted." << endl
          << "  -d" << endl
          << "       Reads in the BAM that are not properly paired will be extracted." << endl
+         << "  -n" << endl
+         << "       Reads in the BAM that are not properly paired will be extracted (without reads where one or both are unmapped)." << endl
          << "  -s" << endl
          << "       Reads in the BAM that have supplementary alignments will be extracted." << endl << endl
          << "  --filtered" << endl
@@ -435,6 +439,12 @@ void parse_bamfile_disc(const char *bam_filename, const string &output_template)
             continue;
         }
 
+        if (no_unmapped) {
+            // Read or mate unmapped
+            if (!(read->core.flag & BAM_FUNMAP) || !(read->core.flag & BAM_FMUNMAP))
+                continue;
+        }
+        
         exported++;
         ostringstream ostr;
         ostr << "@" << get_read_name(read) << endl
@@ -806,6 +816,10 @@ int main (int argc, char *argv[]) {
                 break;
             case 'd' :
                 disco = 1;
+                break;
+            case 'n' :
+                disco = 1;
+                no_unmapped = 1;
                 break;
             case 's' :
                 split = 1;
