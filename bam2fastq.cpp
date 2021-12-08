@@ -1,5 +1,6 @@
 /*
 Copyright 2010, HudsonAlpha Institute for Biotechnology
+Copyright 2021, Gerben Voshol
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -32,16 +33,21 @@ Written by Phillip Dexheimer
 using namespace std;
 
 const char version[] = "1.1.0";
-const char shortopts[] = "o:vhfqs";
+const char shortopts[] = "o:vhfqsuda";
 
 int save_aligned = 1;
 int save_unaligned = 1;
-int save_filtered = 1;
+int save_filtered = 0;
 int overwrite_files = 0;
 int stdout_pairs = 0;
 int stdout_all = 0;
 int print_msgs = 1;
 int strict = 0;
+
+int align = 0; // save mapped reads
+int unmap = 0; // save unmapped reads
+int disco = 0; // save discordant reads
+int split = 0; // save split reads
 
 static struct option longopts[] = {
     { "help",            no_argument,       NULL,           'h' },
@@ -49,7 +55,11 @@ static struct option longopts[] = {
     { "output",          required_argument, NULL,           'o' },
     { "force",           no_argument,       NULL,           'f' },
     { "quiet",           no_argument,       NULL,           'q' },
-    { "strict",          no_argument,       NULL,           's' },
+//    { "mapped",              no_argument,       NULL,           'a' }, // save aligned
+    { "unmapped",        no_argument,       NULL,           'u' }, // save unmapped
+    { "discordant",      no_argument,       NULL,           'd' }, // save discordant
+    { "split",           no_argument,       NULL,           's' }, // save split
+    { "strict",          no_argument,       NULL,            0  },
     { "overwrite",       no_argument,       &overwrite_files,0  },
     { "aligned",         no_argument,       &save_aligned,   1  },
     { "no-aligned",      no_argument,       &save_aligned,   0  },
@@ -80,21 +90,21 @@ void usage(int error=1) {
          << "  -f, --force, --overwrite" << endl
          << "       Create output files specified with --output, overwriting existing" << endl
          << "       files if necessary [Default: exit program rather than overwrite files]" << endl << endl
-         << "  --aligned" << endl
-         << "  --no-aligned" << endl
-         << "       Reads in the BAM that are aligned will (will not) be extracted." << endl
-         << "       [Default: extract aligned reads]" << endl << endl
-         << "  --unaligned" << endl
-         << "  --no-unaligned" << endl
-         << "       Reads in the BAM that are not aligned will (will not) be extracted." << endl
-         << "       [Default: extract unaligned reads]" << endl << endl
+         // << "  -a" << endl
+         // << "       Reads in the BAM that are aligned will be extracted." << endl
+         << "  -u" << endl
+         << "       Reads in the BAM that are not aligned will be extracted." << endl
+         << "  -d" << endl
+         << "       Reads in the BAM that are not properly paired will be extracted." << endl
+         << "  -s" << endl
+         << "       Reads in the BAM that have supplementary alignments will be extracted." << endl << endl
          << "  --filtered" << endl
          << "  --no-filtered" << endl
          << "       Reads that are marked as failing QC checks will (will not) be extracted." << endl
          << "       [Default: extract filtered reads]" << endl << endl
          << "  -q, --quiet" << endl
          << "       Suppress informational messages [Default: print messages]" << endl << endl
-         << "  -s, --strict" << endl
+         << "  --strict" << endl
          << "       Keep bam2fastq's processing to a minimum, assuming that the BAM strictly"
          << "       meets specifications. [Default: allow some errors in the BAM]" << endl << endl
          << endl;
@@ -285,14 +295,30 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
     map<string, string> unPaired;
     map<string, string>::iterator position;
 
+    size_t filtered = 0;
     do {
         all_seen++;
-        if (!save_aligned && !(read->core.flag & BAM_FUNMAP))
+        // if (!save_aligned && !(read->core.flag & BAM_FUNMAP))
+        //     continue;
+        // if (!save_unaligned && (read->core.flag & BAM_FUNMAP))
+        //     continue;
+        if (!save_filtered) {
+            if (read->core.flag & BAM_FQCFAIL) {
+                printf("HERE\n");
+                filtered++;
+                continue;
+            }
+        }
+
+        //primary neither 0x100 nor 0x800 bit set 
+        if ((read->core.flag & BAM_FSECONDARY) || (read->core.flag & 0x800)) {
             continue;
-        if (!save_unaligned && (read->core.flag & BAM_FUNMAP))
+        }
+
+        // Read or mate unmapped
+        if (!(read->core.flag & BAM_FUNMAP) || !(read->core.flag & BAM_FMUNMAP))
             continue;
-        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
-            continue;
+
 
         exported++;
         ostringstream ostr;
@@ -362,6 +388,7 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
 
     if (print_msgs) {
         cerr << all_seen << " sequences in the BAM file" << endl;
+        cerr << filtered << " sequences" << endl;
         cerr << exported << " sequences exported" << endl;
     }
 }
@@ -396,12 +423,21 @@ void parse_bamfile_disc(const char *bam_filename, const string &output_template)
 
     do {
         all_seen++;
-        if (!save_aligned && (read->core.flag & BAM_FPROPER_PAIR))
+
+        /* Discordant reads include those reads mapping either too close or too far to their
+         * mates, reads mapped in the same DNA strand (=they have the same orientation), and
+         * those whose mate are not mapping to the reference.
+         */
+
+        if (((read->core.flag & BAM_FPROPER_PAIR) &&  (read->core.flag & BAM_FPAIRED)))
             continue;
-        if (!save_unaligned && !(read->core.flag & BAM_FPROPER_PAIR))
-            continue;
+
         if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
             continue;
+
+        if ((read->core.flag & BAM_FSECONDARY) || (read->core.flag & 0x800)) {
+            continue;
+        }
 
         exported++;
         ostringstream ostr;
@@ -524,21 +560,30 @@ void parse_bamfile_split(const char *bam_filename, const string &output_template
 
     do {
         all_seen++;
-        // unmapped reads are handles somewhere else
-        if (!save_aligned && (read->core.flag & BAM_FUNMAP))
-            continue;
-        if (!save_unaligned && !(read->core.flag & BAM_FUNMAP))
-            continue;
-        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
-            continue;
+        // // unmapped reads are handles somewhere else
+        // if (!save_aligned && (read->core.flag & BAM_FUNMAP))
+        //     continue;
+        // if (!save_unaligned && !(read->core.flag & BAM_FUNMAP))
+        //     continue;
+        // if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+        //     continue;
 
-        // discordant reads are handles somewhere else
-        if (!save_aligned && !(read->core.flag & BAM_FPROPER_PAIR))
+        // // discordant reads are handles somewhere else
+        // if (!save_aligned && !(read->core.flag & BAM_FPROPER_PAIR))
+        //     continue;
+        // if (!save_unaligned && (read->core.flag & BAM_FPROPER_PAIR))
+        //     continue;
+        // if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
+        //     continue;
+
+        // supplementary read
+        if (!(read->core.flag & 0x800)) {
             continue;
-        if (!save_unaligned && (read->core.flag & BAM_FPROPER_PAIR))
+        }
+
+        if (read->core.flag & 0x1) {
             continue;
-        if (!save_filtered && (read->core.flag & BAM_FQCFAIL))
-            continue;
+        }        
 
         if (len_align(read) > 50) {
             continue;
@@ -739,6 +784,7 @@ int main (int argc, char *argv[]) {
     bases[24] = 'A';
     bases[31] = 'N';
     string output_template("s_%#_sequence.txt");
+
     int ch;
     while ((ch = getopt_long(argc, argv, shortopts, longopts, NULL)) != -1)
         switch (ch) {
@@ -756,8 +802,17 @@ int main (int argc, char *argv[]) {
             case 'q' :
                 print_msgs = 0;
                 break;
+            case 'a' :
+                align = 1;
+                break;
+            case 'u' :
+                unmap = 1;
+                break;
+            case 'd' :
+                disco = 1;
+                break;
             case 's' :
-                strict = 1;
+                split = 1;
                 break;
             case '?' : //Unrecognized option
                 usage(2);
@@ -768,10 +823,18 @@ int main (int argc, char *argv[]) {
     if (argc == 0)
         usage(1);
     //parse_bamfile(argv[0], output_template);
-
-    parse_bamfile_unmapped(argv[0], "unmapped#.fastq");
-    parse_bamfile_disc(argv[0], "discordant#.fastq");
-    parse_bamfile_split(argv[0], "split#.fastq");
-
+    char fname[1024];
+    if (unmap) {
+        snprintf(fname, 1024, "%s.unmap.fastq", output_template.c_str());
+        parse_bamfile_unmapped(argv[0], fname);
+    }
+    if (disco) {
+        snprintf(fname, 1024, "%s.disco.fastq", output_template.c_str());
+        parse_bamfile_disc(argv[0], fname);
+    }
+    if (split) {
+        snprintf(fname, 1024, "%s.split.fastq", output_template.c_str());
+        parse_bamfile_split(argv[0], fname);
+    }
     return 0;
 }
