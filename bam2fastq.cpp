@@ -441,10 +441,10 @@ void parse_bamfile_disc(const char *bam_filename, const string &output_template)
 
         if (no_unmapped) {
             // Read or mate unmapped
-            if (!(read->core.flag & BAM_FUNMAP) || !(read->core.flag & BAM_FMUNMAP))
+            if ((read->core.flag & BAM_FUNMAP) || (read->core.flag & BAM_FMUNMAP))
                 continue;
         }
-        
+
         exported++;
         ostringstream ostr;
         ostr << "@" << get_read_name(read) << endl
