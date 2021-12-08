@@ -29,4 +29,4 @@ make
 AUTHOR
 
 This program was originally developed at HudsonAlpha by Phillip Dexheimer. 
-It was packaged on github and slightly modified by Jared Simpson.
+It was packaged on github and slightly modified by Jared Simpson and later by Gerben Voshol.
