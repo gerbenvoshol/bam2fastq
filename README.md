@@ -15,7 +15,7 @@ be present on most Unix-like systems (including Macs).
 First clone the repository from github, including its dependencies:
 
 ```
-git clone --recursive https://github.com/jts/bam2fastq
+git clone --recursive https://github.com/gerbenvoshol/bam2fastq
 ```
 
 Then change to the directory and run make:
