@@ -56,7 +56,7 @@ static struct option longopts[] = {
     { "output",          required_argument, NULL,           'o' },
     { "force",           no_argument,       NULL,           'f' },
     { "quiet",           no_argument,       NULL,           'q' },
-//    { "mapped",              no_argument,       NULL,           'a' }, // save aligned
+    { "mapped",          no_argument,       NULL,           'a' }, // save aligned
     { "unmapped",        no_argument,       NULL,           'u' }, // save unmapped
     { "discordant",      no_argument,       NULL,           'd' }, // save discordant
     { "no_unmapped",     no_argument,       NULL,           'n' }, // Do not output unmapped (one or both) discordant reads
@@ -92,10 +92,10 @@ void usage(int error=1) {
          << "  -f, --force, --overwrite" << endl
          << "       Create output files specified with --output, overwriting existing" << endl
          << "       files if necessary [Default: exit program rather than overwrite files]" << endl << endl
-         // << "  -a" << endl
-         // << "       Reads in the BAM that are aligned will be extracted." << endl
+         << "  -a" << endl
+         << "       Reads in the BAM that are aligned (in pairs) will be extracted." << endl
          << "  -u" << endl
-         << "       Reads in the BAM that are not aligned will be extracted." << endl
+         << "       Reads in the BAM that are not aligned (in pairs) will be extracted." << endl
          << "  -d" << endl
          << "       Reads in the BAM that are not properly paired will be extracted." << endl
          << "  -n" << endl
@@ -271,7 +271,7 @@ struct DeleteObject {
     }
 };
 
-void parse_bamfile_unmapped(const char *bam_filename, const string &output_template) {
+void parse_bamfile_mapped(const char *bam_filename, const string &output_template) {
     samfile_t *sam = samopen(bam_filename, "rb", NULL);
     if (sam == NULL) {
         cerr << "Could not open " << bam_filename << endl;
@@ -316,10 +316,130 @@ void parse_bamfile_unmapped(const char *bam_filename, const string &output_templ
             continue;
         }
 
-        // Read or mate unmapped
-        if (!(read->core.flag & BAM_FUNMAP) || !(read->core.flag & BAM_FMUNMAP))
+        // Move to next position if read or mate are unmapped
+        if ((read->core.flag & 12))
             continue;
 
+        exported++;
+        ostringstream ostr;
+        ostr << "@" << get_read_name(read) << endl
+             << get_sequence(read) << endl
+             << "+" << endl
+             << get_qualities(read) << endl;
+
+        //Paired-end is complicated, because both members of the pair
+        //have to be output at the same position of the two files
+
+        // If there is only one output filehandle we don't care about
+        // pairing and can write immediately
+        if(output.size() == 1) {
+            *output[0] << ostr.str();
+        } else if( !(read->core.flag & BAM_FPAIRED) ) {
+            // Is this an unpaired read in a BAM with pairs? write to the _M file
+            *output[2] << ostr.str();
+        } else {
+
+            // Search for the pair in the map
+            string pairName(get_pair_name(read));
+            if (!strict)
+                mangle(pairName);
+            position = unPaired.find(pairName);
+            if (position == unPaired.end()) {
+                //I haven't seen the other member of this pair, so just save it
+                unPaired[pairName] = ostr.str();
+            } else {
+                //Aha!  This will be the second of the two.  Dump them both,
+                //then clean up
+                int r_idx = get_read_idx(read);
+
+                // Since we want to output interleaved pairs in stdout mode
+                // we need to take care to write them in the correct order
+                if(r_idx == 0) {
+                    *output[0] << ostr.str();
+                    *output[1] << position->second;
+                } else {
+                    *output[0] << position->second;
+                    *output[1] << ostr.str();
+                }
+                unPaired.erase(position);
+            }
+        }
+
+    } while (bam_read1(sam->x.bam, read) > 0);
+
+    //The documentation for bam_read1 says that it returns the number of
+    //bytes read - which is true, unless it doesn't read any.  It returns
+    //-1 for normal EOF and -2 for unexpected EOF.  So don't just wait for
+    //it to return 0...
+    bam_destroy1(read);
+    samclose(sam);
+
+    // Write the remaining unpaired file to the single-end file
+    for(map<string, string>::iterator iter = unPaired.begin(); 
+            iter != unPaired.end(); ++iter) {
+        *output[2] << iter->second;
+    }
+
+    // Clean up filehandles
+    for(size_t i = 0; i < output.size(); ++i) {
+        if(output[i] != &std::cout)
+            delete output[i];
+    }
+
+    if (print_msgs) {
+        cerr << all_seen << " sequences in the BAM file" << endl;
+        cerr << exported << " sequences exported" << endl;
+    }
+}
+
+void parse_bamfile_unmapped(const char *bam_filename, const string &output_template) {
+    samfile_t *sam = samopen(bam_filename, "rb", NULL);
+    if (sam == NULL) {
+        cerr << "Could not open " << bam_filename << endl;
+        return;
+    }
+    bam1_t *read = bam_init1();
+    size_t exported = 0;
+    size_t all_seen = 0;
+
+    bam_read1(sam->x.bam, read);
+    int lane = get_lane_id(read);
+
+    vector<ostream *> output;
+    if(stdout_pairs) {
+        output = initialize_paired_stdout();
+    } else if(stdout_all) {
+        output = initialize_all_stdout();
+    } else {
+        output = initialize_output(output_template, lane);
+    }
+
+    if (output.empty())
+        return;
+
+    map<string, string> unPaired;
+    map<string, string>::iterator position;
+
+    do {
+        all_seen++;
+        // if (!save_aligned && !(read->core.flag & BAM_FUNMAP))
+        //     continue;
+        // if (!save_unaligned && (read->core.flag & BAM_FUNMAP))
+        //     continue;
+        if (!save_filtered) {
+            if (read->core.flag & BAM_FQCFAIL) {
+                continue;
+            }
+        }
+
+        //primary neither 0x100 nor 0x800 (supplementeary) bit set 
+        if ((read->core.flag & BAM_FSECONDARY) || (read->core.flag & 0x800)) {
+            continue;
+        }
+
+        // If not read or mate unmapped move to the next position
+        if (!(read->core.flag & 12))
+            continue;
 
         exported++;
         ostringstream ostr;
@@ -834,6 +954,10 @@ int main (int argc, char *argv[]) {
         usage(1);
     //parse_bamfile(argv[0], output_template);
     char fname[1024];
+    if (align) {
+        snprintf(fname, 1024, "%s.align.fastq", output_template.c_str());
+        parse_bamfile_mapped(argv[0], fname);
+    }
     if (unmap) {
         snprintf(fname, 1024, "%s.unmap.fastq", output_template.c_str());
         parse_bamfile_unmapped(argv[0], fname);
